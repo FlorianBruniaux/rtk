@@ -1,6 +1,6 @@
 [package]
 name = "rtk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
@@ -12,11 +12,10 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # CLI framework
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
 
 # File system traversal with gitignore support
 ignore = "0.4"
@@ -25,24 +24,6 @@ walkdir = "2"
 # Regex for code filtering
 regex = "1"
 lazy_static = "1.4"
-
-# Syntax highlighting / language detection
-tree-sitter = "0.24"
-tree-sitter-rust = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-go = "0.23"
-
-# Local LLM inference (candle)
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
-tokenizers = "0.20"
-hf-hub = "0.3"
-
-# Async runtime (for model downloading)
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -57,20 +38,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-[profile.dev]
-opt-level = 0
-
-# cargo-dist configuration
-[workspace.metadata.dist]
-cargo-dist-version = "0.22.1"
-ci = "github"
-installers = ["shell", "homebrew"]
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu"
-]
-tap = "pszymkowiak/homebrew-tap"
-publish-jobs = ["homebrew"]

@@ -1,221 +1,308 @@
-use anyhow::{bail, Context, Result};
-use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::llama::{Cache, Llama, LlamaConfig};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use anyhow::{Context, Result};
+use regex::Regex;
 use std::fs;
 use std::path::Path;
-use tokenizers::Tokenizer;
 
-const MAX_TOKENS: usize = 256;
-const TEMPERATURE: f64 = 0.7;
-const TOP_P: f64 = 0.9;
+use crate::filter::Language;
 
-pub fn run(file: &Path, model_id: &str, _force_download: bool, verbose: u8) -> Result<()> {
+/// Heuristic-based code summarizer - no external model needed
+pub fn run(file: &Path, _model: &str, _force_download: bool, verbose: u8) -> Result<()> {
     if verbose > 0 {
-        eprintln!("Summarizing: {}", file.display());
+        eprintln!("Analyzing: {}", file.display());
     }
 
-    // Read file content
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-    // Truncate content if too long (keep first ~2000 chars for context)
-    let truncated = if content.len() > 2000 {
-        format!("{}...\n[truncated]", &content[..2000])
-    } else {
-        content.clone()
-    };
+    let lang = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(Language::from_extension)
+        .unwrap_or(Language::Unknown);
 
-    // Build prompt
-    let prompt = format!(
-        r#"<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-You are a code analysis assistant. Provide a 2-line technical summary of the given code. Be concise and focus on:
-1. What the code does (purpose/functionality)
-2. Key implementation details (patterns, algorithms, dependencies)
-<|eot_id|><|start_header_id|>user<|end_header_id|>
-Summarize this code in exactly 2 lines:
+    let summary = analyze_code(&content, &lang);
 
-```
-{}
-```
-<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-"#,
-        truncated
-    );
-
-    if verbose > 1 {
-        eprintln!("Loading model: {}", model_id);
-    }
-
-    // Download and load model
-    let device = Device::Cpu;
-    let (model, tokenizer, config) = load_model(model_id, &device, verbose)?;
-
-    // Generate summary
-    let summary = generate(&model, &tokenizer, &config, &prompt, &device, verbose)?;
-
-    // Output only the summary (first 2 non-empty lines)
-    let lines: Vec<&str> = summary
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .take(2)
-        .collect();
-
-    for line in lines {
-        println!("{}", line);
-    }
+    println!("{}", summary.line1);
+    println!("{}", summary.line2);
 
     Ok(())
 }
 
-fn load_model(
-    model_id: &str,
-    device: &Device,
-    verbose: u8,
-) -> Result<(Llama, Tokenizer, candle_transformers::models::llama::Config)> {
-    let api = Api::new().context("Failed to create HuggingFace API client")?;
-    let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
-
-    if verbose > 0 {
-        eprintln!("Downloading model files from HuggingFace...");
-    }
-
-    // Download required files
-    let config_path = repo
-        .get("config.json")
-        .context("Failed to download config.json")?;
-    let tokenizer_path = repo
-        .get("tokenizer.json")
-        .context("Failed to download tokenizer.json")?;
-
-    // For smaller models, try to get a single safetensors file
-    let weights_path = repo
-        .get("model.safetensors")
-        .or_else(|_| repo.get("pytorch_model.bin"))
-        .context("Failed to download model weights")?;
-
-    if verbose > 1 {
-        eprintln!("Config: {}", config_path.display());
-        eprintln!("Tokenizer: {}", tokenizer_path.display());
-        eprintln!("Weights: {}", weights_path.display());
-    }
-
-    // Load config
-    let config_str = fs::read_to_string(&config_path)?;
-    let llama_config: LlamaConfig = serde_json::from_str(&config_str)?;
-    let config = llama_config.into_config(false);
-
-    // Load tokenizer
-    let tokenizer = Tokenizer::from_file(&tokenizer_path)
-        .map_err(|e| anyhow::anyhow!("Tokenizer error: {}", e))?;
-
-    // Load model weights
-    if verbose > 0 {
-        eprintln!("Loading model into memory...");
-    }
-
-    let vb = if weights_path
-        .extension()
-        .map(|e| e == "safetensors")
-        .unwrap_or(false)
-    {
-        unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, device)? }
-    } else {
-        bail!("Only safetensors format is supported");
-    };
-
-    let model = Llama::load(vb, &config)?;
-
-    Ok((model, tokenizer, config))
+struct CodeSummary {
+    line1: String,
+    line2: String,
 }
 
-fn generate(
-    model: &Llama,
-    tokenizer: &Tokenizer,
-    config: &candle_transformers::models::llama::Config,
-    prompt: &str,
-    device: &Device,
-    verbose: u8,
-) -> Result<String> {
-    // Tokenize input
-    let tokens = tokenizer
-        .encode(prompt, true)
-        .map_err(|e| anyhow::anyhow!("Tokenization error: {}", e))?;
+fn analyze_code(content: &str, lang: &Language) -> CodeSummary {
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
 
-    let input_ids: Vec<u32> = tokens.get_ids().to_vec();
-    let mut all_tokens = input_ids.clone();
+    // Extract components
+    let imports = extract_imports(content, lang);
+    let functions = extract_functions(content, lang);
+    let structs = extract_structs(content, lang);
+    let traits = extract_traits(content, lang);
 
-    if verbose > 1 {
-        eprintln!("Input tokens: {}", input_ids.len());
+    // Detect patterns
+    let patterns = detect_patterns(content, lang);
+
+    // Build line 1: What it is
+    let lang_name = lang_display_name(lang);
+    let main_type = if !structs.is_empty() && !functions.is_empty() {
+        format!("{} module", lang_name)
+    } else if !structs.is_empty() {
+        format!("{} data structures", lang_name)
+    } else if !functions.is_empty() {
+        format!("{} functions", lang_name)
+    } else {
+        format!("{} code", lang_name)
+    };
+
+    let components: Vec<String> = [
+        (!functions.is_empty()).then(|| format!("{} fn", functions.len())),
+        (!structs.is_empty()).then(|| format!("{} struct", structs.len())),
+        (!traits.is_empty()).then(|| format!("{} trait", traits.len())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let line1 = if components.is_empty() {
+        format!("{} ({} lines)", main_type, total_lines)
+    } else {
+        format!("{} ({}) - {} lines", main_type, components.join(", "), total_lines)
+    };
+
+    // Build line 2: Key details
+    let mut details = Vec::new();
+
+    // Main imports/dependencies
+    if !imports.is_empty() {
+        let key_imports: Vec<&str> = imports.iter().take(3).map(|s| s.as_str()).collect();
+        details.push(format!("uses: {}", key_imports.join(", ")));
     }
 
-    // Create logits processor
-    let mut logits_processor = LogitsProcessor::new(42, Some(TEMPERATURE), Some(TOP_P));
+    // Key patterns detected
+    if !patterns.is_empty() {
+        details.push(format!("patterns: {}", patterns.join(", ")));
+    }
 
-    // Create KV cache
-    let mut cache = Cache::new(false, DType::F32, config, device)?;
-
-    // Generate tokens
-    let mut pos = 0usize;
-
-    for _ in 0..MAX_TOKENS {
-        let input = if pos == 0 {
-            Tensor::new(&input_ids[..], device)?.unsqueeze(0)?
-        } else {
-            let last_token = *all_tokens.last().unwrap();
-            Tensor::new(&[last_token], device)?.unsqueeze(0)?
-        };
-
-        let logits = model.forward(&input, pos, &mut cache)?;
-        let logits = logits.squeeze(0)?;
-        let logits = logits.get(logits.dim(0)? - 1)?;
-
-        let next_token = logits_processor.sample(&logits)?;
-
-        // Check for EOS token
-        if next_token == 128001 || next_token == 128009 {
-            // Llama 3 EOS tokens
-            break;
-        }
-
-        all_tokens.push(next_token);
-
-        if pos == 0 {
-            pos = input_ids.len();
-        } else {
-            pos += 1;
-        }
-
-        if verbose > 2 {
-            eprint!(".");
+    // Main functions/structs
+    if !functions.is_empty() {
+        let key_fns: Vec<&str> = functions.iter().take(3).map(|s| s.as_str()).collect();
+        if details.is_empty() {
+            details.push(format!("defines: {}", key_fns.join(", ")));
         }
     }
 
-    if verbose > 2 {
-        eprintln!();
+    let line2 = if details.is_empty() {
+        "General purpose code file".to_string()
+    } else {
+        details.join(" | ")
+    };
+
+    CodeSummary { line1, line2 }
+}
+
+fn lang_display_name(lang: &Language) -> &'static str {
+    match lang {
+        Language::Rust => "Rust",
+        Language::Python => "Python",
+        Language::JavaScript => "JavaScript",
+        Language::TypeScript => "TypeScript",
+        Language::Go => "Go",
+        Language::C => "C",
+        Language::Cpp => "C++",
+        Language::Java => "Java",
+        Language::Ruby => "Ruby",
+        Language::Shell => "Shell",
+        Language::Unknown => "Code",
+    }
+}
+
+fn extract_imports(content: &str, lang: &Language) -> Vec<String> {
+    let pattern = match lang {
+        Language::Rust => r"^use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)?)",
+        Language::Python => r"^(?:from\s+(\S+)|import\s+(\S+))",
+        Language::JavaScript | Language::TypeScript => r#"(?:import.*from\s+['"]([^'"]+)['"]|require\(['"]([^'"]+)['"]\))"#,
+        Language::Go => r#"^\s*"([^"]+)"$"#,
+        _ => return Vec::new(),
+    };
+
+    let re = Regex::new(pattern).unwrap();
+    let mut imports = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        if let Some(caps) = re.captures(line) {
+            let import = caps.get(1).or(caps.get(2)).map(|m| m.as_str().to_string());
+            if let Some(imp) = import {
+                let base = imp.split("::").next().unwrap_or(&imp).to_string();
+                if !seen.contains(&base) && !is_std_import(&base, lang) {
+                    seen.insert(base.clone());
+                    imports.push(base);
+                }
+            }
+        }
     }
 
-    // Decode output (only the generated part)
-    let output_tokens = &all_tokens[input_ids.len()..];
-    let output = tokenizer
-        .decode(output_tokens, true)
-        .map_err(|e| anyhow::anyhow!("Decoding error: {}", e))?;
+    imports.into_iter().take(5).collect()
+}
 
-    Ok(output)
+fn is_std_import(name: &str, lang: &Language) -> bool {
+    match lang {
+        Language::Rust => matches!(name, "std" | "core" | "alloc"),
+        Language::Python => matches!(name, "os" | "sys" | "re" | "json" | "typing"),
+        _ => false,
+    }
+}
+
+fn extract_functions(content: &str, lang: &Language) -> Vec<String> {
+    let pattern = match lang {
+        Language::Rust => r"(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        Language::Python => r"def\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        Language::JavaScript | Language::TypeScript => {
+            r"(?:async\s+)?function\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:const|let|var)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s+)?\("
+        }
+        Language::Go => r"func\s+(?:\([^)]+\)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)",
+        _ => return Vec::new(),
+    };
+
+    let re = Regex::new(pattern).unwrap();
+    let mut functions = Vec::new();
+
+    for line in content.lines() {
+        if let Some(caps) = re.captures(line) {
+            let name = caps.get(1).or(caps.get(2)).map(|m| m.as_str().to_string());
+            if let Some(n) = name {
+                if !n.starts_with("test_") && n != "main" && n != "new" {
+                    functions.push(n);
+                }
+            }
+        }
+    }
+
+    functions.into_iter().take(10).collect()
+}
+
+fn extract_structs(content: &str, lang: &Language) -> Vec<String> {
+    let pattern = match lang {
+        Language::Rust => r"(?:pub\s+)?(?:struct|enum)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        Language::Python => r"class\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        Language::TypeScript => r"(?:interface|class|type)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        Language::Go => r"type\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+struct",
+        Language::Java => r"(?:public\s+)?class\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        _ => return Vec::new(),
+    };
+
+    let re = Regex::new(pattern).unwrap();
+    re.captures_iter(content)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .take(10)
+        .collect()
+}
+
+fn extract_traits(content: &str, lang: &Language) -> Vec<String> {
+    let pattern = match lang {
+        Language::Rust => r"(?:pub\s+)?trait\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        Language::TypeScript => r"interface\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+        _ => return Vec::new(),
+    };
+
+    let re = Regex::new(pattern).unwrap();
+    re.captures_iter(content)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .take(5)
+        .collect()
+}
+
+fn detect_patterns(content: &str, lang: &Language) -> Vec<String> {
+    let mut patterns = Vec::new();
+
+    // Common patterns
+    if content.contains("async") && content.contains("await") {
+        patterns.push("async".to_string());
+    }
+
+    match lang {
+        Language::Rust => {
+            if content.contains("impl") && content.contains("for") {
+                patterns.push("trait impl".to_string());
+            }
+            if content.contains("#[derive") {
+                patterns.push("derive".to_string());
+            }
+            if content.contains("Result<") || content.contains("anyhow::") {
+                patterns.push("error handling".to_string());
+            }
+            if content.contains("#[test]") {
+                patterns.push("tests".to_string());
+            }
+            if content.contains("Box<dyn") || content.contains("&dyn") {
+                patterns.push("dyn dispatch".to_string());
+            }
+        }
+        Language::Python => {
+            if content.contains("@dataclass") {
+                patterns.push("dataclass".to_string());
+            }
+            if content.contains("def __init__") {
+                patterns.push("OOP".to_string());
+            }
+        }
+        Language::JavaScript | Language::TypeScript => {
+            if content.contains("useState") || content.contains("useEffect") {
+                patterns.push("React hooks".to_string());
+            }
+            if content.contains("export default") {
+                patterns.push("ES modules".to_string());
+            }
+        }
+        _ => {}
+    }
+
+    patterns.into_iter().take(3).collect()
 }
 
 #[cfg(test)]
 mod tests {
-    // Integration tests would require model download
-    // Skip in CI, run manually with: cargo test -- --ignored
+    use super::*;
 
     #[test]
-    #[ignore]
-    fn test_model_loading() {
-        // This test requires network access and ~2GB download
-        // Run with: cargo test test_model_loading -- --ignored
+    fn test_rust_analysis() {
+        let code = r#"
+use anyhow::Result;
+use std::fs;
+
+pub struct Config {
+    name: String,
+}
+
+pub fn load_config() -> Result<Config> {
+    Ok(Config { name: "test".into() })
+}
+
+fn helper() {}
+"#;
+        let summary = analyze_code(code, &Language::Rust);
+        assert!(summary.line1.contains("Rust"));
+        assert!(summary.line1.contains("fn"));
+    }
+
+    #[test]
+    fn test_python_analysis() {
+        let code = r#"
+import json
+from pathlib import Path
+
+class Config:
+    def __init__(self, name):
+        self.name = name
+
+def load_config():
+    return Config("test")
+"#;
+        let summary = analyze_code(code, &Language::Python);
+        assert!(summary.line1.contains("Python"));
     }
 }
