@@ -4,6 +4,8 @@ use ignore::WalkBuilder;
 use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
+use std::process::Command;
+use crate::tracking;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -83,13 +85,29 @@ pub fn run(path: &Path, max_depth: usize, show_hidden: bool, format: OutputForma
 
     let entries = collect_entries(path, max_depth, show_hidden)?;
 
-    match format {
-        OutputFormat::Tree => print_tree(&entries, 0),
-        OutputFormat::Flat => print_flat(&entries),
-        OutputFormat::Json => print_json(&entries)?,
-    }
+    // Capture output for tracking
+    let output = match format {
+        OutputFormat::Tree => format_tree(&entries),
+        OutputFormat::Flat => format_flat(&entries),
+        OutputFormat::Json => format_json(&entries)?,
+    };
+
+    println!("{}", output);
+
+    // Get raw ls output for comparison
+    let raw = get_raw_ls(path);
+    tracking::track("ls -la", "rtk ls", &raw, &output);
 
     Ok(())
+}
+
+fn get_raw_ls(path: &Path) -> String {
+    Command::new("ls")
+        .args(["-la"])
+        .arg(path)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
 }
 
 fn collect_entries(path: &Path, max_depth: usize, show_hidden: bool) -> Result<Vec<DirEntry>> {
@@ -145,7 +163,8 @@ fn collect_entries(path: &Path, max_depth: usize, show_hidden: bool) -> Result<V
     Ok(entries)
 }
 
-fn print_tree(entries: &[DirEntry], _base_depth: usize) {
+fn format_tree(entries: &[DirEntry]) -> String {
+    let mut output = String::new();
     let mut depth_has_more: Vec<bool> = vec![false; 32];
 
     for (i, entry) in entries.iter().enumerate() {
@@ -154,7 +173,6 @@ fn print_tree(entries: &[DirEntry], _base_depth: usize) {
             .map(|next| next.depth <= entry.depth)
             .unwrap_or(true);
 
-        // Build the prefix
         let mut prefix = String::new();
         for d in 1..entry.depth {
             if depth_has_more.get(d).copied().unwrap_or(false) {
@@ -178,15 +196,15 @@ fn print_tree(entries: &[DirEntry], _base_depth: usize) {
             }
         }
 
-        // Format name with color
         let display_name = if entry.is_dir {
             format!("{}/", entry.name).blue().bold().to_string()
         } else {
             colorize_by_extension(&entry.name)
         };
 
-        println!("{}{}", prefix, display_name);
+        output.push_str(&format!("{}{}\n", prefix, display_name));
     }
+    output
 }
 
 fn colorize_by_extension(name: &str) -> String {
@@ -203,17 +221,19 @@ fn colorize_by_extension(name: &str) -> String {
     }
 }
 
-fn print_flat(entries: &[DirEntry]) {
+fn format_flat(entries: &[DirEntry]) -> String {
+    let mut output = String::new();
     for entry in entries {
         if entry.is_dir {
-            println!("{}/", entry.path);
+            output.push_str(&format!("{}/\n", entry.path));
         } else {
-            println!("{}", entry.path);
+            output.push_str(&format!("{}\n", entry.path));
         }
     }
+    output
 }
 
-fn print_json(entries: &[DirEntry]) -> Result<()> {
+fn format_json(entries: &[DirEntry]) -> Result<String> {
     #[derive(serde::Serialize)]
     struct JsonEntry {
         path: String,
@@ -230,9 +250,7 @@ fn print_json(entries: &[DirEntry]) -> Result<()> {
         })
         .collect();
 
-    let json = serde_json::to_string_pretty(&json_entries)?;
-    println!("{}", json);
-    Ok(())
+    Ok(serde_json::to_string_pretty(&json_entries)?)
 }
 
 #[cfg(test)]

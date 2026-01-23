@@ -1,14 +1,13 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::process::Command;
+use crate::tracking;
 
-/// Run find/glob and show compact tree summary
 pub fn run(pattern: &str, path: &str, max_results: usize, verbose: u8) -> Result<()> {
     if verbose > 0 {
-        eprintln!("Finding: {} in {}", pattern, path);
+        eprintln!("find: {} in {}", pattern, path);
     }
 
-    // Use fd if available, otherwise find
     let output = Command::new("fd")
         .args([pattern, path, "--type", "f"])
         .output()
@@ -21,12 +20,15 @@ pub fn run(pattern: &str, path: &str, max_results: usize, verbose: u8) -> Result
     let stdout = String::from_utf8_lossy(&output.stdout);
     let files: Vec<&str> = stdout.lines().collect();
 
+    let raw_output = stdout.to_string();
+
     if files.is_empty() {
-        println!("No files found matching '{}'", pattern);
+        let msg = format!("0 for '{}'", pattern);
+        println!("{}", msg);
+        tracking::track(&format!("find {} -name '{}'", path, pattern), "rtk find", &raw_output, &msg);
         return Ok(());
     }
 
-    // Group by directory
     let mut by_dir: HashMap<String, Vec<String>> = HashMap::new();
 
     for file in &files {
@@ -39,18 +41,17 @@ pub fn run(pattern: &str, path: &str, max_results: usize, verbose: u8) -> Result
         by_dir.entry(dir).or_default().push(filename);
     }
 
-    // Sort directories
     let mut dirs: Vec<_> = by_dir.keys().collect();
     dirs.sort();
+    let dirs_count = dirs.len();
 
-    // Print compact tree
-    println!("📁 Found {} files in {} directories:", files.len(), dirs.len());
+    println!("📁 {}F {}D:", files.len(), dirs_count);
     println!();
 
     let mut shown = 0;
     for dir in dirs {
         if shown >= max_results {
-            println!("... +{} more results", files.len() - shown);
+            println!("+{}", files.len() - shown);
             break;
         }
 
@@ -62,39 +63,40 @@ pub fn run(pattern: &str, path: &str, max_results: usize, verbose: u8) -> Result
         };
 
         if files_in_dir.len() <= 3 {
-            // Show individual files
             println!("{}/ ({})", dir_display, files_in_dir.len());
             for f in files_in_dir {
                 println!("  └─ {}", f);
                 shown += 1;
             }
         } else {
-            // Show summary
-            println!("{}/ ({} files)", dir_display, files_in_dir.len());
+            println!("{}/ ({}F)", dir_display, files_in_dir.len());
             for f in files_in_dir.iter().take(2) {
                 println!("  ├─ {}", f);
                 shown += 1;
             }
-            println!("  └─ ... +{} more", files_in_dir.len() - 2);
+            println!("  +{}", files_in_dir.len() - 2);
             shown += files_in_dir.len() - 2;
         }
     }
 
-    // Extension summary
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     for file in &files {
-        let ext = file.rsplit('.').next().unwrap_or("(no ext)");
+        let ext = file.rsplit('.').next().unwrap_or("none");
         *by_ext.entry(ext.to_string()).or_default() += 1;
     }
 
+    let mut ext_line = String::new();
     if by_ext.len() > 1 {
         println!();
-        print!("📊 Extensions: ");
         let mut exts: Vec<_> = by_ext.iter().collect();
         exts.sort_by(|a, b| b.1.cmp(a.1));
-        let ext_str: Vec<String> = exts.iter().take(5).map(|(e, c)| format!(".{} ({})", e, c)).collect();
-        println!("{}", ext_str.join(", "));
+        let ext_str: Vec<String> = exts.iter().take(5).map(|(e, c)| format!(".{}({})", e, c)).collect();
+        ext_line = format!("ext: {}", ext_str.join(" "));
+        println!("{}", ext_line);
     }
+
+    let rtk_output = format!("{}F {}D + {}", files.len(), dirs_count, ext_line);
+    tracking::track(&format!("find {} -name '{}'", path, pattern), "rtk find", &raw_output, &rtk_output);
 
     Ok(())
 }

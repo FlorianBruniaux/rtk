@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::{Command, Stdio};
+use crate::tracking;
 
 /// Run a command and provide a heuristic summary
 pub fn run(command: &str, verbose: u8) -> Result<()> {
@@ -9,27 +10,18 @@ pub fn run(command: &str, verbose: u8) -> Result<()> {
     }
 
     let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+        Command::new("cmd").args(["/C", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute command")?;
+        Command::new("sh").args(["-c", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    }.context("Failed to execute command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
 
-    let summary = summarize_output(&combined, command, output.status.success());
+    let summary = summarize_output(&raw, command, output.status.success());
     println!("{}", summary);
-
+    tracking::track(command, "rtk summary", &raw, &summary);
     Ok(())
 }
 

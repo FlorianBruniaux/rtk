@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::Path;
+use crate::tracking;
 
 /// Filter and deduplicate log output
 pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
@@ -14,6 +15,7 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
     let content = fs::read_to_string(file)?;
     let result = analyze_logs(&content);
     println!("{}", result);
+    tracking::track(&format!("cat {}", file.display()), "rtk log", &content, &result);
     Ok(())
 }
 

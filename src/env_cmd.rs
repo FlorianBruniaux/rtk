@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::env;
 use std::collections::HashSet;
+use crate::tracking;
 
 /// Show filtered environment variables (hide sensitive data)
 pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
@@ -107,13 +108,15 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         }
     }
 
-    // Summary
     let total = vars.len();
     let shown = path_vars.len() + lang_vars.len() + cloud_vars.len() + tool_vars.len() + other_vars.len().min(20);
     if filter.is_none() {
         println!("\n📊 Total: {} vars (showing {} relevant)", total, shown);
     }
 
+    let raw: String = vars.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
+    let rtk = format!("{} vars -> {} shown", total, shown);
+    tracking::track("env", "rtk env", &raw, &rtk);
     Ok(())
 }
 

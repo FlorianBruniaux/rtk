@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::process::Command;
+use crate::tracking;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -161,6 +162,13 @@ fn run_log(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()>
 }
 
 fn run_status(_verbose: u8) -> Result<()> {
+    // Get raw git status for tracking
+    let raw_output = Command::new("git")
+        .args(["status"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
     let output = Command::new("git")
         .args(["status", "--porcelain", "-b"])
         .output()
@@ -171,6 +179,7 @@ fn run_status(_verbose: u8) -> Result<()> {
 
     if lines.is_empty() {
         println!("Clean working tree");
+        tracking::track("git status", "rtk git status", &raw_output, "Clean working tree");
         return Ok(());
     }
 
@@ -256,6 +265,10 @@ fn run_status(_verbose: u8) -> Result<()> {
     if conflicts > 0 {
         println!("⚠️  Conflicts: {} files", conflicts);
     }
+
+    // Estimate output size for tracking
+    let rtk_output = format!("branch + {} staged + {} modified + {} untracked", staged, modified, untracked);
+    tracking::track("git status", "rtk git status", &raw_output, &rtk_output);
 
     Ok(())
 }
@@ -364,27 +377,30 @@ fn run_push(verbose: u8) -> Result<()> {
         .output()
         .context("Failed to run git push")?;
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw = format!("{}{}", stdout, stderr);
+
     if output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Check if already up to date
         if stderr.contains("Everything up-to-date") {
             println!("ok (up-to-date)");
+            tracking::track("git push", "rtk git push", &raw, "ok (up-to-date)");
         } else {
-            // Extract branch info like "main -> main"
             for line in stderr.lines() {
                 if line.contains("->") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 {
-                        println!("ok ✓ {}", parts[parts.len()-1]);
+                        let msg = format!("ok ✓ {}", parts[parts.len()-1]);
+                        println!("{}", msg);
+                        tracking::track("git push", "rtk git push", &raw, &msg);
                         return Ok(());
                     }
                 }
             }
             println!("ok ✓");
+            tracking::track("git push", "rtk git push", &raw, "ok ✓");
         }
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         eprintln!("FAILED: git push");
         if !stderr.trim().is_empty() {
             eprintln!("{}", stderr);

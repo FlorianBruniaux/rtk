@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
+use crate::tracking;
 
 /// Ultra-condensed diff - only changed lines, no context
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
@@ -10,41 +11,34 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
 
     let content1 = fs::read_to_string(file1)?;
     let content2 = fs::read_to_string(file2)?;
+    let raw = format!("{}\n---\n{}", content1, content2);
 
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
-
     let diff = compute_diff(&lines1, &lines2);
+    let mut rtk = String::new();
 
     if diff.added == 0 && diff.removed == 0 {
-        println!("✅ Files are identical");
+        rtk.push_str("✅ Files are identical");
+        println!("{}", rtk);
+        tracking::track(&format!("diff {} {}", file1.display(), file2.display()), "rtk diff", &raw, &rtk);
         return Ok(());
     }
 
-    // Print summary
-    println!("📊 {} → {}", file1.display(), file2.display());
-    println!("   +{} added, -{} removed, ~{} modified", diff.added, diff.removed, diff.modified);
-    println!();
+    rtk.push_str(&format!("📊 {} → {}\n", file1.display(), file2.display()));
+    rtk.push_str(&format!("   +{} added, -{} removed, ~{} modified\n\n", diff.added, diff.removed, diff.modified));
 
-    // Print changes (condensed)
     for change in diff.changes.iter().take(50) {
         match change {
-            DiffChange::Added(line_num, content) => {
-                println!("+{:4} {}", line_num, truncate(content, 80));
-            }
-            DiffChange::Removed(line_num, content) => {
-                println!("-{:4} {}", line_num, truncate(content, 80));
-            }
-            DiffChange::Modified(line_num, old, new) => {
-                println!("~{:4} {} → {}", line_num, truncate(old, 35), truncate(new, 35));
-            }
+            DiffChange::Added(ln, c) => rtk.push_str(&format!("+{:4} {}\n", ln, truncate(c, 80))),
+            DiffChange::Removed(ln, c) => rtk.push_str(&format!("-{:4} {}\n", ln, truncate(c, 80))),
+            DiffChange::Modified(ln, old, new) => rtk.push_str(&format!("~{:4} {} → {}\n", ln, truncate(old, 35), truncate(new, 35))),
         }
     }
+    if diff.changes.len() > 50 { rtk.push_str(&format!("... +{} more changes", diff.changes.len() - 50)); }
 
-    if diff.changes.len() > 50 {
-        println!("... +{} more changes", diff.changes.len() - 50);
-    }
-
+    print!("{}", rtk);
+    tracking::track(&format!("diff {} {}", file1.display(), file2.display()), "rtk diff", &raw, &rtk);
     Ok(())
 }
 

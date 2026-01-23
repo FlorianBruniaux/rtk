@@ -1,9 +1,11 @@
+mod config;
 mod container;
 mod deps;
 mod diff_cmd;
 mod env_cmd;
 mod filter;
 mod find_cmd;
+mod gain;
 mod git;
 mod grep_cmd;
 mod init;
@@ -14,6 +16,7 @@ mod ls;
 mod read;
 mod runner;
 mod summary;
+mod tracking;
 mod wget_cmd;
 
 use anyhow::Result;
@@ -40,32 +43,43 @@ struct Cli {
 enum Commands {
     /// List directory contents in ultra-dense, token-optimized format
     Ls {
+        /// Directory path
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Max depth
         #[arg(short, long, default_value = "10")]
         depth: usize,
+        /// Show hidden files
         #[arg(short = 'a', long)]
         all: bool,
+        /// Output format: tree, flat, json
         #[arg(short, long, default_value = "tree")]
         format: ls::OutputFormat,
     },
 
     /// Read file with intelligent filtering
     Read {
+        /// File to read
         file: PathBuf,
+        /// Filter: none, minimal, aggressive
         #[arg(short, long, default_value = "minimal")]
         level: filter::FilterLevel,
+        /// Max lines
         #[arg(short, long)]
         max_lines: Option<usize>,
+        /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
     Smart {
+        /// File to analyze
         file: PathBuf,
+        /// Model: heuristic
         #[arg(short, long, default_value = "heuristic")]
         model: String,
+        /// Force model download
         #[arg(long)]
         force_download: bool,
     },
@@ -78,33 +92,40 @@ enum Commands {
 
     /// Run command and show only errors/warnings
     Err {
+        /// Command to run
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
 
     /// Run tests and show only failures
     Test {
+        /// Test command (e.g. cargo test)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
 
     /// Show JSON structure without values
     Json {
+        /// JSON file
         file: PathBuf,
+        /// Max depth
         #[arg(short, long, default_value = "5")]
         depth: usize,
     },
 
     /// Summarize project dependencies
     Deps {
+        /// Project path
         #[arg(default_value = ".")]
         path: PathBuf,
     },
 
     /// Show environment variables (filtered, sensitive masked)
     Env {
+        /// Filter by name (e.g. PATH, AWS)
         #[arg(short, long)]
         filter: Option<String>,
+        /// Show all (include sensitive)
         #[arg(long)]
         show_all: bool,
     },
@@ -149,6 +170,7 @@ enum Commands {
 
     /// Run command and show heuristic summary
     Summary {
+        /// Command to run and summarize
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -193,36 +215,60 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Show token savings summary and history
+    Gain {
+        /// Show ASCII graph of daily savings
+        #[arg(short, long)]
+        graph: bool,
+        /// Show recent command history
+        #[arg(short = 'H', long)]
+        history: bool,
+    },
+
+    /// Show or create configuration file
+    Config {
+        /// Create default config file
+        #[arg(long)]
+        create: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum GitCommands {
+    /// Condensed diff output
     Diff {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+        /// Max lines
         #[arg(short, long)]
         max_lines: Option<usize>,
     },
+    /// One-line commit history
     Log {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+        /// Number of commits
         #[arg(short = 'n', long, default_value = "10")]
         count: usize,
     },
+    /// Compact status
     Status,
-    /// Add files (minimal output)
+    /// Add files → "ok ✓"
     Add {
+        /// Files to add
         #[arg(trailing_var_arg = true)]
         files: Vec<String>,
     },
-    /// Commit with message (minimal output)
+    /// Commit → "ok ✓ <hash>"
     Commit {
+        /// Commit message
         #[arg(short, long)]
         message: String,
     },
-    /// Push to remote (minimal output)
+    /// Push → "ok ✓ <branch>"
     Push,
-    /// Pull from remote (minimal output)
+    /// Pull → "ok ✓ <stats>"
     Pull,
 }
 
@@ -411,6 +457,19 @@ fn main() -> Result<()> {
                 wget_cmd::run_stdout(&url, &args, cli.verbose)?;
             } else {
                 wget_cmd::run(&url, &args, cli.verbose)?;
+            }
+        }
+
+        Commands::Gain { graph, history } => {
+            gain::run(graph, history, cli.verbose)?;
+        }
+
+        Commands::Config { create } => {
+            if create {
+                let path = config::Config::create_default()?;
+                println!("Created: {}", path.display());
+            } else {
+                config::show_config()?;
             }
         }
     }

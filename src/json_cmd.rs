@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+use crate::tracking;
 
 /// Show JSON structure without values
 pub fn run(file: &Path, max_depth: usize, verbose: u8) -> Result<()> {
@@ -17,7 +18,7 @@ pub fn run(file: &Path, max_depth: usize, verbose: u8) -> Result<()> {
 
     let schema = extract_schema(&value, 0, max_depth);
     println!("{}", schema);
-
+    tracking::track(&format!("cat {}", file.display()), "rtk json", &content, &schema);
     Ok(())
 }
 

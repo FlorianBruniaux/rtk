@@ -39,6 +39,10 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             cross: true
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
 
     steps:
       - name: Checkout
@@ -57,13 +61,20 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Build
-        run: |
-          cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           tar -czvf ../../../rtk-${{ matrix.target }}.${{ matrix.archive }} rtk
+          cd ../../..
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../rtk-${{ matrix.target }}.${{ matrix.archive }} rtk.exe
           cd ../../..
 
       - name: Upload artifact
@@ -72,9 +83,58 @@ jobs:
           name: rtk-${{ matrix.target }}
           path: rtk-${{ matrix.target }}.${{ matrix.archive }}
 
+  build-deb:
+    name: Build DEB package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build DEB
+        run: cargo deb
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-deb
+          path: target/debian/*.deb
+
+  build-rpm:
+    name: Build RPM package
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y rust cargo rpm-build
+
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Generate RPM
+        run: cargo generate-rpm
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-rpm
+          path: target/generate-rpm/*.rpm
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-deb, build-rpm]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -94,17 +154,15 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} release/ \;
+
       - name: Create checksums
         run: |
-          cd artifacts
-          for dir in */; do
-            cd "$dir"
-            for file in *; do
-              sha256sum "$file" >> ../checksums.txt
-            done
-            cd ..
-          done
-          mv checksums.txt ../
+          cd release
+          sha256sum * > checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -114,9 +172,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: |
-            artifacts/**/*
-            checksums.txt
+          files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

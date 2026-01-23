@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::{Command, Stdio};
+use crate::tracking;
 
 /// Run a command and filter output to show only errors/warnings
 pub fn run_err(command: &str, verbose: u8) -> Result<()> {
@@ -9,42 +10,31 @@ pub fn run_err(command: &str, verbose: u8) -> Result<()> {
     }
 
     let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+        Command::new("cmd").args(["/C", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute command")?;
+        Command::new("sh").args(["-c", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    }.context("Failed to execute command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let combined = format!("{}\n{}", stdout, stderr);
-    let filtered = filter_errors(&combined);
+    let raw = format!("{}\n{}", stdout, stderr);
+    let filtered = filter_errors(&raw);
+    let mut rtk = String::new();
 
     if filtered.is_empty() {
         if output.status.success() {
-            println!("✅ Command completed successfully (no errors)");
+            rtk.push_str("✅ Command completed successfully (no errors)");
         } else {
-            println!("❌ Command failed (exit code: {:?})", output.status.code());
-            // Show last 10 lines as context
-            let lines: Vec<&str> = combined.lines().collect();
-            let start = lines.len().saturating_sub(10);
-            for line in &lines[start..] {
-                println!("  {}", line);
-            }
+            rtk.push_str(&format!("❌ Command failed (exit code: {:?})\n", output.status.code()));
+            let lines: Vec<&str> = raw.lines().collect();
+            for line in lines.iter().rev().take(10).rev() { rtk.push_str(&format!("  {}\n", line)); }
         }
     } else {
-        println!("{}", filtered);
+        rtk.push_str(&filtered);
     }
 
+    println!("{}", rtk);
+    tracking::track(command, "rtk run-err", &raw, &rtk);
     Ok(())
 }
 
@@ -55,27 +45,18 @@ pub fn run_test(command: &str, verbose: u8) -> Result<()> {
     }
 
     let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+        Command::new("cmd").args(["/C", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute test command")?;
+        Command::new("sh").args(["-c", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    }.context("Failed to execute test command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
 
-    let summary = extract_test_summary(&combined, command);
+    let summary = extract_test_summary(&raw, command);
     println!("{}", summary);
-
+    tracking::track(command, "rtk run-test", &raw, &summary);
     Ok(())
 }
 
