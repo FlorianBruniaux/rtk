@@ -299,7 +299,14 @@ fn run_add(files: &[String], verbose: u8) -> Result<()> {
         }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        println!("err: {}", stderr.lines().next().unwrap_or("unknown error"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("FAILED: git add");
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr);
+        }
+        if !stdout.trim().is_empty() {
+            eprintln!("{}", stdout);
+        }
     }
 
     Ok(())
@@ -331,11 +338,16 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let msg = stderr.lines().chain(stdout.lines()).next().unwrap_or("unknown error");
-        if msg.contains("nothing to commit") {
+        if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
             println!("ok (nothing to commit)");
         } else {
-            println!("err: {}", msg);
+            eprintln!("FAILED: git commit");
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr);
+            }
+            if !stdout.trim().is_empty() {
+                eprintln!("{}", stdout);
+            }
         }
     }
 
@@ -372,8 +384,14 @@ fn run_push(verbose: u8) -> Result<()> {
         }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("unknown error");
-        println!("err: {}", msg);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("FAILED: git push");
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr);
+        }
+        if !stdout.trim().is_empty() {
+            eprintln!("{}", stdout);
+        }
     }
 
     Ok(())
@@ -424,8 +442,13 @@ fn run_pull(verbose: u8) -> Result<()> {
             }
         }
     } else {
-        let msg = stderr.lines().chain(stdout.lines()).find(|l| !l.trim().is_empty()).unwrap_or("unknown error");
-        println!("err: {}", msg);
+        eprintln!("FAILED: git pull");
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr);
+        }
+        if !stdout.trim().is_empty() {
+            eprintln!("{}", stdout);
+        }
     }
 
     Ok(())
