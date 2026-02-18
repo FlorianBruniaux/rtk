@@ -45,9 +45,16 @@ CLI output (rtk gain) or JSON/CSV export
 
 ### Storage Location
 
-- **Linux**: `~/.local/share/rtk/tracking.db`
-- **macOS**: `~/Library/Application Support/rtk/tracking.db`
-- **Windows**: `%APPDATA%\rtk\tracking.db`
+Default: `~/.local/share/rtk/history.db` (all platforms)
+
+Override with:
+1. `RTK_DB_PATH` environment variable
+2. `tracking.database_path` in `~/.config/rtk/config.toml`
+
+> **Note (v0.16+)**: Previously, macOS used `~/Library/Application Support/rtk/history.db`.
+> This path contains a space, which causes silent write failures in the Claude Code sandbox
+> (see [issue #94](https://github.com/rtk-ai/rtk/issues/94)).
+> RTK now uses the XDG-style path on all platforms and auto-migrates existing macOS databases.
 
 ### Data Retention
 
@@ -545,12 +552,24 @@ let _ = conn.execute(
 
 ## Troubleshooting
 
+### Tracking not working in Claude Code sandbox (macOS)
+
+If `rtk gain` shows no data despite using RTK commands, the sandbox may be blocking
+writes to paths with spaces. Since v0.16, RTK uses `~/.local/share/rtk/history.db`
+(space-free) by default. If you're on an older version, set `RTK_DB_PATH`:
+
+```bash
+export RTK_DB_PATH="$HOME/.local/share/rtk/history.db"
+```
+
+See [issue #94](https://github.com/rtk-ai/rtk/issues/94) for details.
+
 ### Database locked error
 
 If you see "database is locked" errors:
 - Ensure only one RTK process writes at a time
-- Check file permissions on `~/.local/share/rtk/tracking.db`
-- Delete and recreate: `rm ~/.local/share/rtk/tracking.db && rtk gain`
+- Check file permissions on `~/.local/share/rtk/history.db`
+- Delete and recreate: `rm ~/.local/share/rtk/history.db && rtk gain`
 
 ### Missing exec_time_ms column
 

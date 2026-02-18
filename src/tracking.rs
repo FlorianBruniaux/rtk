@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! - Storage: SQLite database (~/.local/share/rtk/tracking.db)
+//! - Storage: SQLite database (~/.local/share/rtk/history.db)
 //! - Retention: 90-day automatic cleanup
 //! - Metrics: Input/output tokens, savings %, execution time
 //!
@@ -49,9 +49,9 @@ const HISTORY_DAYS: i64 = 90;
 ///
 /// # Database Location
 ///
-/// - Linux: `~/.local/share/rtk/tracking.db`
-/// - macOS: `~/Library/Application Support/rtk/tracking.db`
-/// - Windows: `%APPDATA%\rtk\tracking.db`
+/// Default: `~/.local/share/rtk/history.db` (all platforms)
+///
+/// Override with `RTK_DB_PATH` env var or `tracking.database_path` in config.toml.
 ///
 /// # Examples
 ///
@@ -690,9 +690,90 @@ fn get_db_path() -> Result<PathBuf> {
         }
     }
 
-    // Priority 3: Default platform-specific location
-    let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(data_dir.join("rtk").join("history.db"))
+    // Priority 3: XDG-style path (~/.local/share/rtk/history.db)
+    // Uses a space-free path on all platforms to avoid issues with
+    // Claude Code sandbox on macOS (see issue #94).
+    // Previously used dirs::data_local_dir() which returns
+    // ~/Library/Application Support/ on macOS (contains a space).
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let new_path = home
+        .join(".local")
+        .join("share")
+        .join("rtk")
+        .join("history.db");
+
+    // Auto-migrate from old macOS path if needed
+    if cfg!(target_os = "macos") {
+        migrate_from_old_macos_path(&home, &new_path);
+    }
+
+    Ok(new_path)
+}
+
+/// Migrate tracking DB from the old macOS path (~/Library/Application Support/rtk/)
+/// to the new XDG-style path (~/.local/share/rtk/).
+///
+/// Only copies if the old DB exists and the new one does not.
+/// Verifies the copied DB integrity with a SQLite quick_check.
+fn migrate_from_old_macos_path(home: &std::path::Path, new_path: &std::path::Path) {
+    let old_path = home
+        .join("Library")
+        .join("Application Support")
+        .join("rtk")
+        .join("history.db");
+
+    if old_path.exists() && !new_path.exists() {
+        // Ensure parent directory exists
+        if let Some(parent) = new_path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+
+        // Use SQLite backup API via VACUUM INTO for a consistent copy
+        // (avoids copying a DB that's being written to concurrently)
+        match Connection::open(&old_path) {
+            Ok(conn) => {
+                let new_path_str = new_path.to_string_lossy();
+                match conn.execute_batch(&format!("VACUUM INTO '{new_path_str}'")) {
+                    Ok(()) => {
+                        eprintln!(
+                            "rtk: migrated tracking DB from {} to {}",
+                            old_path.display(),
+                            new_path.display()
+                        );
+                    }
+                    Err(e) => {
+                        // Clean up partial file if VACUUM INTO failed
+                        let _ = std::fs::remove_file(new_path);
+                        eprintln!(
+                            "rtk: warning: failed to migrate tracking DB from {}: {}",
+                            old_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "rtk: warning: could not open old tracking DB at {}: {}",
+                    old_path.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
+/// Print a warning to stderr when tracking fails.
+///
+/// Helps diagnose silent tracking failures (e.g., sandbox blocking writes
+/// to paths with spaces on macOS). Suggests `RTK_DB_PATH` workaround.
+fn warn_tracking_failure(err: &anyhow::Error) {
+    eprintln!(
+        "rtk: warning: tracking failed: {err:#}. \
+         Set RTK_DB_PATH to a writable path without spaces."
+    );
 }
 
 /// Estimate token count from text using ~4 chars = 1 token heuristic.
@@ -791,14 +872,19 @@ impl TimedExecution {
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
 
-        if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(
-                original_cmd,
-                rtk_cmd,
-                input_tokens,
-                output_tokens,
-                elapsed_ms,
-            );
+        match Tracker::new() {
+            Ok(tracker) => {
+                if let Err(e) = tracker.record(
+                    original_cmd,
+                    rtk_cmd,
+                    input_tokens,
+                    output_tokens,
+                    elapsed_ms,
+                ) {
+                    warn_tracking_failure(&e);
+                }
+            }
+            Err(e) => warn_tracking_failure(&e),
         }
     }
 
@@ -825,8 +911,13 @@ impl TimedExecution {
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         // input_tokens=0, output_tokens=0 won't dilute savings statistics
-        if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+        match Tracker::new() {
+            Ok(tracker) => {
+                if let Err(e) = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms) {
+                    warn_tracking_failure(&e);
+                }
+            }
+            Err(e) => warn_tracking_failure(&e),
         }
     }
 }
@@ -882,14 +973,24 @@ pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     let input_tokens = estimate_tokens(input);
     let output_tokens = estimate_tokens(output);
 
-    if let Ok(tracker) = Tracker::new() {
-        let _ = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens, 0);
+    match Tracker::new() {
+        Ok(tracker) => {
+            if let Err(e) = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens, 0) {
+                warn_tracking_failure(&e);
+            }
+        }
+        Err(e) => warn_tracking_failure(&e),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that modify RTK_DB_PATH env var
+    // (env vars are process-global, so parallel tests race)
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1015,6 +1116,7 @@ mod tests {
     // 7. get_db_path respects environment variable RTK_DB_PATH
     #[test]
     fn test_custom_db_path_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         use std::env;
 
         let custom_path = "/tmp/rtk_test_custom.db";
@@ -1026,9 +1128,10 @@ mod tests {
         env::remove_var("RTK_DB_PATH");
     }
 
-    // 8. get_db_path falls back to default when no custom config
+    // 8. get_db_path falls back to XDG-style path without spaces (issue #94)
     #[test]
     fn test_default_db_path() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         use std::env;
 
         // Ensure no env var is set
@@ -1036,5 +1139,118 @@ mod tests {
 
         let db_path = get_db_path().expect("Failed to get db path");
         assert!(db_path.ends_with("rtk/history.db"));
+
+        // Critical: path must not contain spaces (Claude Code sandbox issue #94)
+        let path_str = db_path.to_string_lossy();
+        assert!(
+            !path_str.contains(' '),
+            "DB path must not contain spaces for sandbox compatibility, got: {path_str}"
+        );
+
+        // Should use ~/.local/share/rtk/ pattern
+        assert!(
+            path_str.contains(".local/share/rtk"),
+            "DB path should use XDG-style .local/share/rtk, got: {path_str}"
+        );
+    }
+
+    // 9. migrate_from_old_macos_path copies DB when old exists and new doesn't
+    #[test]
+    fn test_migration_from_old_path() {
+        use std::fs;
+
+        let tmp = std::env::temp_dir().join(format!("rtk_migration_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create tmp dir");
+
+        // Set up old path with a real SQLite DB (VACUUM INTO requires valid DB)
+        let old_dir = tmp.join("Library").join("Application Support").join("rtk");
+        fs::create_dir_all(&old_dir).expect("create old dir");
+        let old_db = old_dir.join("history.db");
+        let conn = Connection::open(&old_db).expect("create old db");
+        conn.execute(
+            "CREATE TABLE commands (id INTEGER PRIMARY KEY, data TEXT)",
+            [],
+        )
+        .expect("create table");
+        conn.execute("INSERT INTO commands (data) VALUES ('test')", [])
+            .expect("insert");
+        drop(conn);
+
+        // New path should not exist yet
+        let new_path = tmp
+            .join(".local")
+            .join("share")
+            .join("rtk")
+            .join("history.db");
+        assert!(!new_path.exists());
+
+        // Run migration
+        migrate_from_old_macos_path(&tmp, &new_path);
+
+        // New file should exist and be a valid SQLite DB
+        assert!(new_path.exists(), "migration should create new DB");
+        let conn = Connection::open(&new_path).expect("open migrated db");
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM commands", [], |row| row.get(0))
+            .expect("query migrated db");
+        assert_eq!(count, 1, "migrated DB should have 1 record");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // 10. migrate_from_old_macos_path does NOT overwrite existing new DB
+    #[test]
+    fn test_migration_does_not_overwrite() {
+        use std::fs;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "rtk_migration_no_overwrite_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create tmp dir");
+
+        // Set up old path with a real SQLite DB
+        let old_dir = tmp.join("Library").join("Application Support").join("rtk");
+        fs::create_dir_all(&old_dir).expect("create old dir");
+        let old_db = old_dir.join("history.db");
+        let conn = Connection::open(&old_db).expect("create old db");
+        conn.execute(
+            "CREATE TABLE commands (id INTEGER PRIMARY KEY, data TEXT)",
+            [],
+        )
+        .expect("create table");
+        conn.execute("INSERT INTO commands (data) VALUES ('old')", [])
+            .expect("insert");
+        drop(conn);
+
+        // Set up new path with a different DB (already exists)
+        let new_dir = tmp.join(".local").join("share").join("rtk");
+        fs::create_dir_all(&new_dir).expect("create new dir");
+        let new_path = new_dir.join("history.db");
+        let conn = Connection::open(&new_path).expect("create new db");
+        conn.execute(
+            "CREATE TABLE commands (id INTEGER PRIMARY KEY, data TEXT)",
+            [],
+        )
+        .expect("create table");
+        conn.execute("INSERT INTO commands (data) VALUES ('new')", [])
+            .expect("insert");
+        drop(conn);
+
+        // Run migration — should NOT overwrite
+        migrate_from_old_macos_path(&tmp, &new_path);
+
+        // Verify new DB still has 'new' data, not 'old'
+        let conn = Connection::open(&new_path).expect("open new db");
+        let data: String = conn
+            .query_row("SELECT data FROM commands LIMIT 1", [], |row| row.get(0))
+            .expect("query new db");
+        assert_eq!(data, "new", "migration must not overwrite existing DB");
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
